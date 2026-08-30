@@ -1,10 +1,7 @@
 import os
-import anthropic
+import sys
 
-# Create Anthropic client
-client = anthropic.Anthropic(
-    api_key=os.environ["ANTHROPIC_API_KEY"]
-)
+import anthropic
 
 # Agent instructions
 SYSTEM_PROMPT = """
@@ -18,36 +15,56 @@ Your responsibilities:
 5. Do not modify files or execute commands.
 """
 
-# Get task from user
-user_task = input("\nEnter your task: ")
+MODEL = "claude-haiku-4-5"
 
-# Send task to Claude
-response = client.messages.create(
-    model="claude-haiku-4-5",
-    max_tokens=1000,
-    system=SYSTEM_PROMPT,
-    messages=[
-        {
-            "role": "user",
-            "content": user_task
-        }
-    ]
-)
 
-# Display response
-print("\n" + "=" * 60)
-print("SINGLE AGENT RESPONSE")
-print("=" * 60)
+def main():
+    # Fail fast with a friendly message if the API key is missing
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        sys.exit(
+            "Error: ANTHROPIC_API_KEY environment variable is not set.\n"
+            'Set it first, e.g.:  set ANTHROPIC_API_KEY=sk-ant-...'
+        )
 
-for block in response.content:
-    if block.type == "text":
-        print(block.text)
+    client = anthropic.Anthropic(api_key=api_key)
 
-print("\n" + "=" * 60)
-print("API INFORMATION")
-print("=" * 60)
+    # Get task from user
+    user_task = input("\nEnter your task: ").strip()
+    if not user_task:
+        sys.exit("No task provided — exiting.")
 
-print("Model:", response.model)
-print("Input tokens:", response.usage.input_tokens)
-print("Output tokens:", response.usage.output_tokens)
-print("Stop reason:", response.stop_reason)
+    # Send task to Claude
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=1000,
+        system=SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": user_task
+            }
+        ]
+    )
+
+    # Display response
+    print("\n" + "=" * 60)
+    print("SINGLE AGENT RESPONSE")
+    print("=" * 60)
+
+    for block in response.content:
+        if block.type == "text":
+            print(block.text)
+
+    print("\n" + "=" * 60)
+    print("API INFORMATION")
+    print("=" * 60)
+
+    print("Model:", response.model)
+    print("Input tokens:", response.usage.input_tokens)
+    print("Output tokens:", response.usage.output_tokens)
+    print("Stop reason:", response.stop_reason)
+
+
+if __name__ == "__main__":
+    main()

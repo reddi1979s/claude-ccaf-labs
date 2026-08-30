@@ -1,9 +1,9 @@
 import os
+import sys
+
 import anthropic
 
-client = anthropic.Anthropic(
-    api_key=os.environ["ANTHROPIC_API_KEY"]
-)
+MODEL = "claude-haiku-4-5"
 
 SYSTEM_PROMPT = """
 You are a Kubernetes security and reliability review agent.
@@ -46,52 +46,89 @@ def read_file(filename):
         return f"Error reading file: {e}"
 
 
-user_task = input(
-    "\nEnter your task "
-    "(example: Review deployment.yaml): "
-)
+# Map tool names → functions so dispatch stays data-driven
+TOOL_REGISTRY = {
+    "read_file": read_file,
+}
 
-messages = [
-    {
-        "role": "user",
-        "content": user_task
-    }
-]
+# Safety cap only — the primary stop condition is stop_reason == "end_turn"
+MAX_ITERATIONS = 10
 
-# First request to Claude
-response = client.messages.create(
-    model="claude-haiku-4-5-20251001",
-    max_tokens=1500,
-    system=SYSTEM_PROMPT,
-    tools=tools,
-    messages=messages
-)
 
-# Agent/tool loop
-while response.stop_reason == "tool_use":
+def main():
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        sys.exit(
+            "Error: ANTHROPIC_API_KEY environment variable is not set.\n"
+            'Set it first, e.g.:  set ANTHROPIC_API_KEY=sk-ant-...'
+        )
 
-    messages.append(
+    client = anthropic.Anthropic(api_key=api_key)
+
+    user_task = input(
+        "\nEnter your task "
+        "(example: Review deployment.yaml): "
+    ).strip()
+    if not user_task:
+        sys.exit("No task provided — exiting.")
+
+    messages = [
         {
-            "role": "assistant",
-            "content": response.content
+            "role": "user",
+            "content": user_task
         }
-    )
+    ]
 
-    tool_results = []
+    response = None
+    for _ in range(MAX_ITERATIONS):
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=1500,
+            system=SYSTEM_PROMPT,
+            tools=tools,
+            messages=messages
+        )
 
-    for block in response.content:
+        # Agent is done when it stops asking for tools
+        if response.stop_reason != "tool_use":
+            break
 
-        if block.type == "tool_use":
+        messages.append(
+            {
+                "role": "assistant",
+                "content": response.content
+            }
+        )
 
-            print(f"\nAgent requested tool: {block.name}")
+        tool_results = []
 
-            if block.name == "read_file":
+        for block in response.content:
 
-                filename = block.input["filename"]
+            if block.type == "tool_use":
 
-                print(f"Reading file: {filename}")
+                print(f"\nAgent requested tool: {block.name}")
 
-                result = read_file(filename)
+                tool_fn = TOOL_REGISTRY.get(block.name)
+
+                if tool_fn is None:
+                    # Unknown tool — tell the model instead of silently
+                    # skipping it (which would send an empty tool_results
+                    # list and trigger an API error)
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "is_error": True,
+                            "content": (
+                                f"Unknown tool '{block.name}'. "
+                                f"Available tools: {sorted(TOOL_REGISTRY)}"
+                            )
+                        }
+                    )
+                    continue
+
+                print(f"Tool input: {block.input}")
+                result = tool_fn(**block.input)
 
                 tool_results.append(
                     {
@@ -101,36 +138,33 @@ while response.stop_reason == "tool_use":
                     }
                 )
 
-    messages.append(
-        {
-            "role": "user",
-            "content": tool_results
-        }
-    )
+        messages.append(
+            {
+                "role": "user",
+                "content": tool_results
+            }
+        )
+    else:
+        print(f"\nWarning: hit safety cap of {MAX_ITERATIONS} iterations.")
 
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1500,
-        system=SYSTEM_PROMPT,
-        tools=tools,
-        messages=messages
-    )
+    # Display final answer
+    print("\n" + "=" * 70)
+    print("SINGLE AGENT + FILE TOOL RESPONSE")
+    print("=" * 70)
+
+    for block in response.content:
+        if block.type == "text":
+            print(block.text)
+
+    print("\n" + "=" * 70)
+    print("API INFORMATION")
+    print("=" * 70)
+
+    print("Model:", response.model)
+    print("Input tokens:", response.usage.input_tokens)
+    print("Output tokens:", response.usage.output_tokens)
+    print("Stop reason:", response.stop_reason)
 
 
-# Display final answer
-print("\n" + "=" * 70)
-print("SINGLE AGENT + FILE TOOL RESPONSE")
-print("=" * 70)
-
-for block in response.content:
-    if block.type == "text":
-        print(block.text)
-
-print("\n" + "=" * 70)
-print("API INFORMATION")
-print("=" * 70)
-
-print("Model:", response.model)
-print("Input tokens:", response.usage.input_tokens)
-print("Output tokens:", response.usage.output_tokens)
-print("Stop reason:", response.stop_reason)
+if __name__ == "__main__":
+    main()

@@ -21,7 +21,7 @@ Setup:
 
 import anthropic
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 client = anthropic.Anthropic()
 MODEL  = "claude-haiku-4-5"
@@ -188,8 +188,9 @@ def normalize_order_result(tool_name, raw_result):
     }
 
     # Convert Unix timestamp → readable date
-    order_date = datetime.utcfromtimestamp(
-        raw_result["ordered_at"]
+    # (datetime.utcfromtimestamp is deprecated since Python 3.12)
+    order_date = datetime.fromtimestamp(
+        raw_result["ordered_at"], tz=timezone.utc
     ).strftime("%B %d, %Y")   # "February 20, 2025"
 
     # Convert cents → display currency
@@ -346,6 +347,22 @@ def handle_tool_call(tool_name: str, tool_id: str, tool_input: dict) -> dict:
     Runs pre-tool hooks (policy gate), the tool itself, and post-tool hooks.
     All errors become structured tool_result responses — never bare exceptions.
     """
+    # ── Unknown tool: return a structured validation error instead of
+    #    letting a KeyError bubble up as a generic "internal" error ────────
+    if tool_name not in TOOL_REGISTRY:
+        print(f"  [TOOL] ERROR: unknown tool '{tool_name}'")
+        return {
+            "type":        "tool_result",
+            "tool_use_id": tool_id,
+            "is_error":    True,
+            "content":     json.dumps({
+                "errorCategory": "validation",
+                "isRetryable":   False,
+                "description":   f"Unknown tool '{tool_name}'. "
+                                 f"Available tools: {sorted(TOOL_REGISTRY)}",
+            }),
+        }
+
     # ── PreToolUse: policy gate ───────────────────────────────────────────
     decision = apply_pre_tool_hooks(tool_name, tool_input)
     if not decision["allowed"]:
@@ -438,16 +455,21 @@ def handle_tool_call(tool_name: str, tool_id: str, tool_input: dict) -> dict:
 # The core loop: send → check stop_reason → run tools → repeat
 # ─────────────────────────────────────────────
 
-def run_agentic_loop(system_prompt: str, user_message: str, tools: list) -> str:
+def run_agentic_loop(system_prompt: str, user_message: str, tools: list,
+                     max_iterations: int = 10) -> str:
     """
     Ep 01 concept: the agentic loop.
     Keeps running until stop_reason == "end_turn".
     Correctly appends assistant message BEFORE tool results each round.
+
+    max_iterations is a SAFETY cap only (not the primary stop condition —
+    that would be an anti-pattern). It prevents infinite API spend if the
+    model ever gets stuck in a tool-call loop.
     """
     messages = [{"role": "user", "content": user_message}]
     print(f"\n  [LOOP] Starting. User: {user_message[:60]}...")
 
-    while True:
+    for iteration in range(1, max_iterations + 1):
         response = client.messages.create(
             model=MODEL,
             max_tokens=1024,
@@ -481,6 +503,20 @@ def run_agentic_loop(system_prompt: str, user_message: str, tools: list) -> str:
             # Step 3: append tool results as a user message
             messages.append({"role": "user", "content": tool_results})
             # Loop continues → next iteration sends full history
+
+        else:
+            # Unexpected stop_reason (e.g. "max_tokens", "refusal") —
+            # don't spin forever burning API calls; surface what we got.
+            partial = next(
+                (b.text for b in response.content if hasattr(b, "text")), ""
+            )
+            print(f"  [LOOP] WARNING: unexpected stop_reason "
+                  f"'{response.stop_reason}' — returning partial response.")
+            return partial or f"[stopped: {response.stop_reason}]"
+
+    # Safety cap reached — return whatever the last assistant text was
+    print(f"  [LOOP] WARNING: hit safety cap of {max_iterations} iterations.")
+    return "[error: agent did not finish within the iteration safety cap]"
 
 
 # ─────────────────────────────────────────────
